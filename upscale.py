@@ -20,6 +20,7 @@ import utils.dataops as ops
 from utils.architecture.RRDB import RRDBNet as ESRGAN
 from utils.architecture.SPSR import SPSRNet as SPSR
 from utils.architecture.SRVGG import SRVGGNetCompact as RealESRGANv2
+from utils.architecture.FDAT import FDATNet as FDAT
 
 
 class SeamlessOptions(str, Enum):
@@ -65,7 +66,7 @@ class Upscale:
     last_nb: int = None
     last_scale: int = None
     last_kind: str = None
-    model: Union[torch.nn.Module, ESRGAN, RealESRGANv2, SPSR] = None
+    model: Union[torch.nn.Module, ESRGAN, RealESRGANv2, SPSR, FDAT] = None
 
     def __init__(
         self,
@@ -354,6 +355,15 @@ class Upscale:
                 self.last_out_nc = self.model.num_out_ch
                 self.last_nf = self.model.num_feat
                 self.last_nb = self.model.num_conv
+                self.last_scale = self.model.scale
+                self.last_model = model_path
+            # FDAT (Fast Dual Aggregation Transformer)
+            elif "conv_first.weight" in state_dict and "groups.0.blocks.0.n1.weight" in state_dict:
+                self.model = FDAT(state_dict)
+                self.last_in_nc = self.model.in_nc
+                self.last_out_nc = self.model.out_nc
+                self.last_nf = self.model.num_feat
+                self.last_nb = self.model.num_blocks
                 self.last_scale = self.model.scale
                 self.last_model = model_path
             # SPSR (ESRGAN with lots of extra layers)
