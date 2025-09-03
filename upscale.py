@@ -22,6 +22,8 @@ from utils.architecture.RRDB import RRDBNet as ESRGAN
 from utils.architecture.SPSR import SPSRNet as SPSR
 from utils.architecture.SRVGG import SRVGGNetCompact as RealESRGANv2
 from utils.architecture.FDAT import FDATNet as FDAT
+from utils.architecture.DAT import DATNet as DAT
+from utils.architecture.DAT_variants import detect_dat_variant, DAT_CONFIGS
 
 
 class SeamlessOptions(str, Enum):
@@ -384,6 +386,17 @@ class Upscale:
                 self.last_scale = self.model.scale
                 self.last_model = model_path
                 self.last_kind = "SPSR"
+            # DAT (Dual Aggregation Transformer) and variants
+            elif self._is_dat_architecture(state_dict):
+                dat_variant = detect_dat_variant(state_dict)
+                self.model = DAT(state_dict)
+                self.last_in_nc = self.model.in_nc
+                self.last_out_nc = self.model.out_nc
+                self.last_nf = self.model.num_feat
+                self.last_nb = self.model.num_blocks
+                self.last_scale = self.model.scale
+                self.last_model = model_path
+                self.last_kind = f"DAT ({dat_variant})"
             # Check for unsupported architectures
             elif self._is_unsupported_architecture(state_dict):
                 unsupported_type = self._detect_unsupported_architecture(state_dict)
@@ -431,6 +444,38 @@ class Upscale:
             map_location = "cpu" if self.cpu else None
             return torch.load(model_path, weights_only=False, map_location=map_location)
 
+    def _is_dat_architecture(self, state_dict):
+        """
+        Check if the model uses DAT (Dual Aggregation Transformer) architecture.
+        
+        Args:
+            state_dict (dict): The model state dictionary
+            
+        Returns:
+            bool: True if the architecture is DAT
+        """
+        # DAT models have these characteristic keys:
+        # - conv_first layer
+        # - layers.X.blocks.Y pattern (residual groups with blocks)
+        # - before_RG layer (before residual groups)
+        # - attn modules in blocks
+        
+        has_conv_first = 'conv_first.weight' in state_dict
+        has_layers = any('layers.' in key for key in state_dict.keys())
+        has_blocks = any('blocks.' in key for key in state_dict.keys()) 
+        has_before_rg = any('before_RG' in key for key in state_dict.keys())
+        has_attn = any('attn.' in key for key in state_dict.keys())
+        
+        # Check for the specific DAT pattern: layers.X.blocks.Y.attn structure
+        has_dat_pattern = False
+        for key in state_dict.keys():
+            if 'layers.' in key and 'blocks.' in key and 'attn.' in key:
+                has_dat_pattern = True
+                break
+        
+        # DAT should have conv_first, layers with blocks, and attention modules
+        return has_conv_first and has_layers and has_blocks and has_attn and has_dat_pattern
+
     def _is_unsupported_architecture(self, state_dict):
         """
         Check if the model uses an unsupported architecture.
@@ -441,12 +486,9 @@ class Upscale:
         Returns:
             bool: True if the architecture is unsupported
         """
-        # Check for DAT2 pattern
-        sample_keys = list(state_dict.keys())[:10]
-        for key in sample_keys:
-            if "layers." in key and "blocks." in key and "attn.attns." in key:
-                return True
-        
+        # Since we now support DAT, we need to check for other unsupported patterns
+        # For now, we'll return False as we support most common architectures
+        # This can be extended in the future for truly unsupported architectures
         return False
     
     def _detect_unsupported_architecture(self, state_dict):
