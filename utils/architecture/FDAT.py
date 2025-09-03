@@ -721,11 +721,15 @@ class FDATNet(nn.Module):
         self.in_nc = self._detect_in_channels(state_dict) if num_in_ch is None else num_in_ch
         self.out_nc = self._detect_out_channels(state_dict) if num_out_ch is None else num_out_ch
         self.num_feat = self._detect_num_feat(state_dict) if num_feat is None else num_feat
-        self.num_blocks = self._detect_num_blocks(state_dict) if num_block is None else num_block
+        
+        # For FDAT, we need num_groups and depth_per_group, not just num_blocks
+        num_groups, depth_per_group = self._detect_group_structure(state_dict)
+        self.num_blocks = num_groups  # For compatibility with the interface
         
         # Detect additional parameters for proper model creation
         upsampler_type = self._detect_upsampler_type(state_dict)
         mid_dim = self._detect_mid_dim(state_dict)
+        num_heads = self._detect_num_heads(state_dict)
         
         # Create FDAT model with detected parameters
         self.model = FDAT(
@@ -733,6 +737,9 @@ class FDATNet(nn.Module):
             num_out_ch=self.out_nc,
             scale=self.scale,
             embed_dim=self.num_feat,
+            num_groups=num_groups,
+            depth_per_group=depth_per_group,
+            num_heads=num_heads,
             upsampler_type=upsampler_type,
             mid_dim=mid_dim,
             **kwargs
@@ -804,19 +811,29 @@ class FDATNet(nn.Module):
                 return state_dict[key].shape[0]
         return 120
     
-    def _detect_num_blocks(self, state_dict):
-        """Detect number of blocks from state dict"""
-        # Count the number of groups
-        group_count = 0
+    def _detect_group_structure(self, state_dict):
+        """Detect number of groups and depth per group from state dict"""
+        groups = set()
+        max_blocks_per_group = 0
+        
         for key in state_dict.keys():
-            if "groups." in key and "blocks." in key:
-                parts = key.split(".")
-                try:
+            if key.startswith('groups.') and 'blocks.' in key:
+                parts = key.split('.')
+                if len(parts) >= 4 and parts[1].isdigit() and parts[3].isdigit():
                     group_idx = int(parts[1])
-                    group_count = max(group_count, group_idx + 1)
-                except (ValueError, IndexError):
-                    continue
-        return group_count if group_count > 0 else 4
+                    block_idx = int(parts[3])
+                    groups.add(group_idx)
+                    max_blocks_per_group = max(max_blocks_per_group, block_idx + 1)
+        
+        num_groups = len(groups) if groups else 4
+        total_blocks_per_group = max_blocks_per_group if max_blocks_per_group > 0 else 6
+        
+        # FDAT uses alternating spatial/channel pattern, so actual depth_per_group 
+        # is total_blocks_per_group divided by pattern length (2)
+        group_block_pattern_len = 2  # ["spatial", "channel"]
+        depth_per_group = total_blocks_per_group // group_block_pattern_len
+        
+        return num_groups, depth_per_group
     
     def _detect_upsampler_type(self, state_dict):
         """Detect upsampler type from state dict"""
@@ -848,6 +865,20 @@ class FDATNet(nn.Module):
         
         # Default to same as num_feat
         return self.num_feat
+    
+    def _detect_num_heads(self, state_dict):
+        """Detect number of attention heads from state dict"""
+        # Look for attn.bias or attn.temp to determine number of heads
+        for key in state_dict.keys():
+            if "groups.0.blocks.0.attn.bias" in key:
+                # The first dimension of attn.bias corresponds to number of heads
+                return state_dict[key].shape[0]
+            elif "groups.0.blocks.1.attn.temp" in key:
+                # The first dimension of attn.temp corresponds to number of heads
+                return state_dict[key].shape[0]
+        
+        # Default to 4 heads
+        return 4
     
     def forward(self, x):
         return self.model(x)

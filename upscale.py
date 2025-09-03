@@ -15,12 +15,15 @@ import typer
 from rich import print
 from rich.logging import RichHandler
 from rich.progress import BarColumn, Progress, TaskID, TimeRemainingColumn
+import safetensors.torch
 
 import utils.dataops as ops
 from utils.architecture.RRDB import RRDBNet as ESRGAN
 from utils.architecture.SPSR import SPSRNet as SPSR
 from utils.architecture.SRVGG import SRVGGNetCompact as RealESRGANv2
 from utils.architecture.FDAT import FDATNet as FDAT
+from utils.architecture.DAT import DATNet as DAT
+from utils.architecture.DAT_variants import detect_dat_variant, DAT_CONFIGS
 
 
 class SeamlessOptions(str, Enum):
@@ -334,8 +337,13 @@ class Upscale:
                 "&" in model_path or "|" in model_path
             ):
                 interps = model_path.split("&")[:2]
-                model_1 = torch.load(interps[0].split("@")[0], weights_only=False)
-                model_2 = torch.load(interps[1].split("@")[0], weights_only=False)
+                model_1_path = interps[0].split("@")[0]
+                model_2_path = interps[1].split("@")[0]
+                
+                # Load each model using appropriate method based on file extension
+                model_1 = self._load_state_dict(model_1_path)
+                model_2 = self._load_state_dict(model_2_path)
+                
                 state_dict = OrderedDict()
                 for k, v_1 in model_1.items():
                     v_2 = model_2[k]
@@ -343,7 +351,7 @@ class Upscale:
                         int(interps[1].split("@")[1]) / 100
                     ) * v_2
             else:
-                state_dict = torch.load(model_path, weights_only=False)
+                state_dict = self._load_state_dict(model_path)
 
             # SRVGGNet Real-ESRGAN (v2)
             if (
@@ -357,6 +365,7 @@ class Upscale:
                 self.last_nb = self.model.num_conv
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "RealESRGAN-v2"
             # FDAT (Fast Dual Aggregation Transformer)
             elif "conv_first.weight" in state_dict and "groups.0.blocks.0.n1.weight" in state_dict:
                 self.model = FDAT(state_dict)
@@ -366,6 +375,7 @@ class Upscale:
                 self.last_nb = self.model.num_blocks
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "FDAT"
             # SPSR (ESRGAN with lots of extra layers)
             elif "f_HR_conv1.0.weight" in state_dict:
                 self.model = SPSR(state_dict)
@@ -375,6 +385,26 @@ class Upscale:
                 self.last_nb = self.model.num_blocks
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "SPSR"
+            # DAT (Dual Aggregation Transformer) and variants
+            elif self._is_dat_architecture(state_dict):
+                dat_variant = detect_dat_variant(state_dict)
+                self.model = DAT(state_dict)
+                self.last_in_nc = self.model.in_nc
+                self.last_out_nc = self.model.out_nc
+                self.last_nf = self.model.num_feat
+                self.last_nb = self.model.num_blocks
+                self.last_scale = self.model.scale
+                self.last_model = model_path
+                self.last_kind = f"DAT ({dat_variant})"
+            # Check for unsupported architectures
+            elif self._is_unsupported_architecture(state_dict):
+                unsupported_type = self._detect_unsupported_architecture(state_dict)
+                self.log.error(f'Unsupported model architecture "{unsupported_type}" in model "{model_path}".')
+                self.log.error('This model architecture is not currently supported by this upscaler.')
+                if unsupported_type == "DAT2":
+                    self.log.error('DAT2 models require a different architecture implementation.')
+                sys.exit(1)
             # Regular ESRGAN, "new-arch" ESRGAN, Real-ESRGAN v1
             else:
                 self.model = ESRGAN(state_dict)
@@ -384,6 +414,7 @@ class Upscale:
                 self.last_nb = self.model.num_blocks
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "ESRGAN"
 
             del state_dict
         self.model.eval()
@@ -391,6 +422,92 @@ class Upscale:
             v.requires_grad = False
         self.model = self.model.to(self.device)
         self.last_model = model_path
+
+    def _load_state_dict(self, model_path: str):
+        """
+        Load a state dictionary from either a .pth or .safetensors file.
+        
+        Args:
+            model_path (str): Path to the model file
+            
+        Returns:
+            dict: The loaded state dictionary
+        """
+        model_path_obj = Path(model_path)
+        
+        if model_path_obj.suffix.lower() == '.safetensors':
+            # Load safetensors file
+            return safetensors.torch.load_file(model_path)
+        else:
+            # Load PyTorch file (.pth, .pt, etc.)
+            # Map to CPU if using CPU mode
+            map_location = "cpu" if self.cpu else None
+            return torch.load(model_path, weights_only=False, map_location=map_location)
+
+    def _is_dat_architecture(self, state_dict):
+        """
+        Check if the model uses DAT (Dual Aggregation Transformer) architecture.
+        
+        Args:
+            state_dict (dict): The model state dictionary
+            
+        Returns:
+            bool: True if the architecture is DAT
+        """
+        # DAT models have these characteristic keys:
+        # - conv_first layer
+        # - layers.X.blocks.Y pattern (residual groups with blocks)
+        # - before_RG layer (before residual groups)
+        # - attn modules in blocks
+        
+        has_conv_first = 'conv_first.weight' in state_dict
+        has_layers = any('layers.' in key for key in state_dict.keys())
+        has_blocks = any('blocks.' in key for key in state_dict.keys()) 
+        has_before_rg = any('before_RG' in key for key in state_dict.keys())
+        has_attn = any('attn.' in key for key in state_dict.keys())
+        
+        # Check for the specific DAT pattern: layers.X.blocks.Y.attn structure
+        has_dat_pattern = False
+        for key in state_dict.keys():
+            if 'layers.' in key and 'blocks.' in key and 'attn.' in key:
+                has_dat_pattern = True
+                break
+        
+        # DAT should have conv_first, layers with blocks, and attention modules
+        return has_conv_first and has_layers and has_blocks and has_attn and has_dat_pattern
+
+    def _is_unsupported_architecture(self, state_dict):
+        """
+        Check if the model uses an unsupported architecture.
+        
+        Args:
+            state_dict (dict): The model state dictionary
+            
+        Returns:
+            bool: True if the architecture is unsupported
+        """
+        # Since we now support DAT, we need to check for other unsupported patterns
+        # For now, we'll return False as we support most common architectures
+        # This can be extended in the future for truly unsupported architectures
+        return False
+    
+    def _detect_unsupported_architecture(self, state_dict):
+        """
+        Detect the specific unsupported architecture type.
+        
+        Args:
+            state_dict (dict): The model state dictionary
+            
+        Returns:
+            str: The architecture type name
+        """
+        # Check for DAT2 pattern
+        sample_keys = list(state_dict.keys())[:10]
+        for key in sample_keys:
+            if "layers." in key and "blocks." in key and "attn.attns." in key:
+                return "DAT2"
+        
+        return "Unknown"
 
     # This code is a somewhat modified version of BlueAmulet's fork of ESRGAN by Xinntao
     def upscale(self, img: np.ndarray) -> np.ndarray:
