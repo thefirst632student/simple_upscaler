@@ -1150,6 +1150,7 @@ class DATNet(nn.Module):
         depth = self._detect_depth(state_dict)
         num_heads = self._detect_num_heads(state_dict)
         expansion_factor = self._detect_expansion_factor(state_dict)
+        split_size = self._detect_split_size(state_dict)
         
         # Create DAT model with detected parameters
         self.model = DAT(
@@ -1159,6 +1160,7 @@ class DATNet(nn.Module):
             depth=depth,
             num_heads=num_heads,
             expansion_factor=expansion_factor,
+            split_size=split_size,
         )
         
         # Load the state dictionary
@@ -1278,6 +1280,44 @@ class DATNet(nn.Module):
             return [4] * len(depth)  # Medium model
         else:
             return [6] * len(depth)  # Large model
+
+    def _detect_split_size(self, state_dict):
+        # Try to detect split size from rpe_biases (more reliable for non-square windows)
+        for key in state_dict.keys():
+            if 'rpe_biases' in key:
+                biases_shape = state_dict[key].shape
+                if len(biases_shape) == 2 and biases_shape[1] == 2:
+                    total_positions = biases_shape[0]
+                    
+                    # Check common DAT split size combinations
+                    common_splits = [[8, 32], [16, 32], [8, 16], [2, 4], [16, 16], [8, 8]]
+                    for h, w in common_splits:
+                        expected = (2*h - 1) * (2*w - 1)
+                        if expected == total_positions:
+                            return [h, w]
+                    
+                    # Try to factorize for unknown combinations
+                    import math
+                    sqrt_pos = math.sqrt(total_positions)
+                    for i in range(1, int(sqrt_pos) + 1):
+                        if total_positions % i == 0:
+                            f1, f2 = i, total_positions // i
+                            if (f1 + 1) % 2 == 0 and (f2 + 1) % 2 == 0:
+                                h = (f1 + 1) // 2
+                                w = (f2 + 1) // 2
+                                return [h, w]
+        
+        # Fallback: try relative position indices for square windows
+        for key in state_dict.keys():
+            if 'relative_position_index' in key:
+                rel_pos_shape = state_dict[key].shape
+                if len(rel_pos_shape) == 2:
+                    window_size = int(rel_pos_shape[0] ** 0.5)  # Should be square
+                    if window_size * window_size == rel_pos_shape[0]:
+                        return [window_size, window_size]
+        
+        # Default fallback
+        return [2, 4]
 
     def _detect_num_blocks(self, state_dict):
         # Count number of residual groups
