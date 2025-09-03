@@ -363,6 +363,7 @@ class Upscale:
                 self.last_nb = self.model.num_conv
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "RealESRGAN-v2"
             # FDAT (Fast Dual Aggregation Transformer)
             elif "conv_first.weight" in state_dict and "groups.0.blocks.0.n1.weight" in state_dict:
                 self.model = FDAT(state_dict)
@@ -372,6 +373,7 @@ class Upscale:
                 self.last_nb = self.model.num_blocks
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "FDAT"
             # SPSR (ESRGAN with lots of extra layers)
             elif "f_HR_conv1.0.weight" in state_dict:
                 self.model = SPSR(state_dict)
@@ -381,6 +383,15 @@ class Upscale:
                 self.last_nb = self.model.num_blocks
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "SPSR"
+            # Check for unsupported architectures
+            elif self._is_unsupported_architecture(state_dict):
+                unsupported_type = self._detect_unsupported_architecture(state_dict)
+                self.log.error(f'Unsupported model architecture "{unsupported_type}" in model "{model_path}".')
+                self.log.error('This model architecture is not currently supported by this upscaler.')
+                if unsupported_type == "DAT2":
+                    self.log.error('DAT2 models require a different architecture implementation.')
+                sys.exit(1)
             # Regular ESRGAN, "new-arch" ESRGAN, Real-ESRGAN v1
             else:
                 self.model = ESRGAN(state_dict)
@@ -390,6 +401,7 @@ class Upscale:
                 self.last_nb = self.model.num_blocks
                 self.last_scale = self.model.scale
                 self.last_model = model_path
+                self.last_kind = "ESRGAN"
 
             del state_dict
         self.model.eval()
@@ -418,6 +430,42 @@ class Upscale:
             # Map to CPU if using CPU mode
             map_location = "cpu" if self.cpu else None
             return torch.load(model_path, weights_only=False, map_location=map_location)
+
+    def _is_unsupported_architecture(self, state_dict):
+        """
+        Check if the model uses an unsupported architecture.
+        
+        Args:
+            state_dict (dict): The model state dictionary
+            
+        Returns:
+            bool: True if the architecture is unsupported
+        """
+        # Check for DAT2 pattern
+        sample_keys = list(state_dict.keys())[:10]
+        for key in sample_keys:
+            if "layers." in key and "blocks." in key and "attn.attns." in key:
+                return True
+        
+        return False
+    
+    def _detect_unsupported_architecture(self, state_dict):
+        """
+        Detect the specific unsupported architecture type.
+        
+        Args:
+            state_dict (dict): The model state dictionary
+            
+        Returns:
+            str: The architecture type name
+        """
+        # Check for DAT2 pattern
+        sample_keys = list(state_dict.keys())[:10]
+        for key in sample_keys:
+            if "layers." in key and "blocks." in key and "attn.attns." in key:
+                return "DAT2"
+        
+        return "Unknown"
 
     # This code is a somewhat modified version of BlueAmulet's fork of ESRGAN by Xinntao
     def upscale(self, img: np.ndarray) -> np.ndarray:
