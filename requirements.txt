@@ -4,3 +4,4 @@ torch
 rich
 typer
 einops
+safetensors

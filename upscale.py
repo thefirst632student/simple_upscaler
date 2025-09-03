@@ -15,6 +15,7 @@ import typer
 from rich import print
 from rich.logging import RichHandler
 from rich.progress import BarColumn, Progress, TaskID, TimeRemainingColumn
+from safetensors.torch import load_file
 
 import utils.dataops as ops
 from utils.architecture.RRDB import RRDBNet as ESRGAN
@@ -298,6 +299,14 @@ class Upscale:
             self.log.error(f'Model "{model_path}" does not exist.')
             sys.exit(1)
 
+    def __load_model_file(self, model_path: str) -> dict:
+        """Load model file based on extension (.pth or .safetensors)"""
+        if model_path.endswith('.safetensors'):
+            return load_file(model_path)
+        else:
+            # For .pth files, use map_location to handle CPU/CUDA device mapping
+            return torch.load(model_path, weights_only=False, map_location=self.device)
+
     # This code is a somewhat modified version of BlueAmulet's fork of ESRGAN by Xinntao
     def process(self, img: np.ndarray):
         """
@@ -334,8 +343,8 @@ class Upscale:
                 "&" in model_path or "|" in model_path
             ):
                 interps = model_path.split("&")[:2]
-                model_1 = torch.load(interps[0].split("@")[0], weights_only=False)
-                model_2 = torch.load(interps[1].split("@")[0], weights_only=False)
+                model_1 = self.__load_model_file(interps[0].split("@")[0])
+                model_2 = self.__load_model_file(interps[1].split("@")[0])
                 state_dict = OrderedDict()
                 for k, v_1 in model_1.items():
                     v_2 = model_2[k]
@@ -343,7 +352,7 @@ class Upscale:
                         int(interps[1].split("@")[1]) / 100
                     ) * v_2
             else:
-                state_dict = torch.load(model_path, weights_only=False)
+                state_dict = self.__load_model_file(model_path)
 
             # SRVGGNet Real-ESRGAN (v2)
             if (
