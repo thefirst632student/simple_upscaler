@@ -15,6 +15,7 @@ import typer
 from rich import print
 from rich.logging import RichHandler
 from rich.progress import BarColumn, Progress, TaskID, TimeRemainingColumn
+import safetensors.torch
 
 import utils.dataops as ops
 from utils.architecture.RRDB import RRDBNet as ESRGAN
@@ -334,8 +335,13 @@ class Upscale:
                 "&" in model_path or "|" in model_path
             ):
                 interps = model_path.split("&")[:2]
-                model_1 = torch.load(interps[0].split("@")[0], weights_only=False)
-                model_2 = torch.load(interps[1].split("@")[0], weights_only=False)
+                model_1_path = interps[0].split("@")[0]
+                model_2_path = interps[1].split("@")[0]
+                
+                # Load each model using appropriate method based on file extension
+                model_1 = self._load_state_dict(model_1_path)
+                model_2 = self._load_state_dict(model_2_path)
+                
                 state_dict = OrderedDict()
                 for k, v_1 in model_1.items():
                     v_2 = model_2[k]
@@ -343,7 +349,7 @@ class Upscale:
                         int(interps[1].split("@")[1]) / 100
                     ) * v_2
             else:
-                state_dict = torch.load(model_path, weights_only=False)
+                state_dict = self._load_state_dict(model_path)
 
             # SRVGGNet Real-ESRGAN (v2)
             if (
@@ -391,6 +397,27 @@ class Upscale:
             v.requires_grad = False
         self.model = self.model.to(self.device)
         self.last_model = model_path
+
+    def _load_state_dict(self, model_path: str):
+        """
+        Load a state dictionary from either a .pth or .safetensors file.
+        
+        Args:
+            model_path (str): Path to the model file
+            
+        Returns:
+            dict: The loaded state dictionary
+        """
+        model_path_obj = Path(model_path)
+        
+        if model_path_obj.suffix.lower() == '.safetensors':
+            # Load safetensors file
+            return safetensors.torch.load_file(model_path)
+        else:
+            # Load PyTorch file (.pth, .pt, etc.)
+            # Map to CPU if using CPU mode
+            map_location = "cpu" if self.cpu else None
+            return torch.load(model_path, weights_only=False, map_location=map_location)
 
     # This code is a somewhat modified version of BlueAmulet's fork of ESRGAN by Xinntao
     def upscale(self, img: np.ndarray) -> np.ndarray:

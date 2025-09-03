@@ -726,6 +726,7 @@ class FDATNet(nn.Module):
         # Detect additional parameters for proper model creation
         upsampler_type = self._detect_upsampler_type(state_dict)
         mid_dim = self._detect_mid_dim(state_dict)
+        num_heads = self._detect_num_heads(state_dict)
         
         # Create FDAT model with detected parameters
         self.model = FDAT(
@@ -733,6 +734,7 @@ class FDATNet(nn.Module):
             num_out_ch=self.out_nc,
             scale=self.scale,
             embed_dim=self.num_feat,
+            num_heads=num_heads,
             upsampler_type=upsampler_type,
             mid_dim=mid_dim,
             **kwargs
@@ -848,6 +850,20 @@ class FDATNet(nn.Module):
         
         # Default to same as num_feat
         return self.num_feat
+    
+    def _detect_num_heads(self, state_dict):
+        """Detect number of attention heads from state dict"""
+        # Look for attn.bias or attn.temp to determine number of heads
+        for key in state_dict.keys():
+            if "groups.0.blocks.0.attn.bias" in key:
+                # The first dimension of attn.bias corresponds to number of heads
+                return state_dict[key].shape[0]
+            elif "groups.0.blocks.1.attn.temp" in key:
+                # The first dimension of attn.temp corresponds to number of heads
+                return state_dict[key].shape[0]
+        
+        # Default to 4 heads
+        return 4
     
     def forward(self, x):
         return self.model(x)
